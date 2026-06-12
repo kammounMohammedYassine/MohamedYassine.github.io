@@ -70,7 +70,7 @@ nav .wrap { display:flex; align-items:center; justify-content:space-between; hei
   position:absolute; inset:0; z-index:0;
   pointer-events:none;
 }
-.hero-bg svg { width:100%; height:100%; }
+.hero-bg canvas { width:100%; height:100%; display:block; }
 
 .hero-content { position:relative; z-index:1; display:grid; grid-template-columns:1fr auto; gap:48px; align-items:center; }
 
@@ -303,21 +303,9 @@ footer p { color:var(--text-dim); font-size:14px; }
 
 <!-- HERO -->
 <header class="hero">
-  <!-- Circuit trace background -->
+  <!-- Animated constellation background -->
   <div class="hero-bg">
-    <svg viewBox="0 0 1200 420" preserveAspectRatio="xMidYMid slice" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-      <path d="M900 0 L900 80 L1050 80 L1050 180 L1200 180" stroke="#1D2229" stroke-width="1.5" fill="none"/>
-      <path d="M750 0 L750 50 L1100 50 L1100 140 L1200 140" stroke="#1D2229" stroke-width="1.5" fill="none"/>
-      <path d="M1000 0 L1000 110 L820 110 L820 260 L1200 260" stroke="#1D2229" stroke-width="1.5" fill="none"/>
-      <path d="M1100 420 L1100 330 L950 330 L950 200" stroke="#1D2229" stroke-width="1.5" fill="none"/>
-      <circle cx="1050" cy="180" r="3.5" fill="#00C9A7" opacity="0.5"/>
-      <circle cx="820"  cy="260" r="3.5" fill="#00C9A7" opacity="0.4"/>
-      <circle cx="950"  cy="200" r="3.5" fill="#E8A33D" opacity="0.5"/>
-      <circle cx="750"  cy="50"  r="2.5" fill="#00C9A7" opacity="0.3"/>
-      <!-- small cross markers -->
-      <line x1="1047" y1="177" x2="1053" y2="183" stroke="#00C9A7" stroke-width="1" opacity="0.4"/>
-      <line x1="1053" y1="177" x2="1047" y2="183" stroke="#00C9A7" stroke-width="1" opacity="0.4"/>
-    </svg>
+    <canvas id="heroCanvas" aria-hidden="true"></canvas>
   </div>
 
   <div class="wrap">
@@ -756,5 +744,328 @@ footer p { color:var(--text-dim); font-size:14px; }
   </div>
 </footer>
 
+<script>
+(function () {
+  const canvas = document.getElementById('heroCanvas');
+  const hero   = canvas.closest('.hero');
+  const ctx    = canvas.getContext('2d');
+
+  /* ─── PALETTE ────────────────────────────────────────────────────────────── */
+  const C = {
+    teal:  [0,   201, 167],   // routers / network gear
+    amber: [232, 163, 61 ],   // servers / VMs
+    blue:  [82,  154, 219],   // PCs / clients
+    cloud: [160, 180, 200],   // cloud nodes / internet
+    grid:  [29,  34,  41 ],
+    dim:   [100, 115, 130],
+  };
+  const rgba = ([r,g,b], a) => `rgba(${r},${g},${b},${a})`;
+
+  /* ─── NODES ──────────────────────────────────────────────────────────────── */
+  // Layout (xr, yr) are ratios 0..1 of canvas W/H
+  // Backbone occupies right ~55% of canvas.
+  // Dept layers fan out to the right of each backbone router.
+  //
+  //  [INTERNET]
+  //      |
+  //  [R-Internet] ←──── full OSPF mesh ────→ [RIT] [RNFS] [RDB] [RWeb]
+  //      each backbone router ──► [CLOUD-x] ~~UDP~~ dept router ──► Switch ──► PCs + VM
+  //
+  // We compress into the right half so hero text (left) stays clear.
+
+  const N = {
+    // ── Internet ──────────────────────────────────────────────────────────────
+    INET:     { xr:.70, yr:.04, col:C.cloud, type:'cloud',  lbl:'INTERNET'    },
+
+    // ── Backbone routers (full mesh OSPF) ─────────────────────────────────────
+    RINET:    { xr:.70, yr:.20, col:C.teal,  type:'router', lbl:'R-Internet'  },  // NAT gw
+    RIT:      { xr:.53, yr:.36, col:C.teal,  type:'router', lbl:'RIT'         },
+    RNFS:     { xr:.87, yr:.36, col:C.teal,  type:'router', lbl:'RNFS'        },
+    RDB:      { xr:.57, yr:.58, col:C.teal,  type:'router', lbl:'RDB'         },
+    RWEB:     { xr:.83, yr:.58, col:C.teal,  type:'router', lbl:'RWeb'        },
+
+    // ── Cloud Nodes (backbone side) ──────────────────────────────────────────
+    CIT:      { xr:.43, yr:.48, col:C.cloud, type:'cloud',  lbl:'CLOUD-IT'    },
+    CNFS:     { xr:.97, yr:.48, col:C.cloud, type:'cloud',  lbl:'CLOUD-NFS'   },
+    CDB:      { xr:.47, yr:.72, col:C.cloud, type:'cloud',  lbl:'CLOUD-DB'    },
+    CWEB:     { xr:.93, yr:.72, col:C.cloud, type:'cloud',  lbl:'CLOUD-Web'   },
+
+    // ── Dept routers (LAN side, after UDP tunnel) ─────────────────────────────
+    DIT:      { xr:.38, yr:.60, col:C.teal,  type:'router', lbl:'R-IT'        },
+    DNFS:     { xr:.99, yr:.60, col:C.teal,  type:'router', lbl:'R-NFS'       },
+    DDB:      { xr:.42, yr:.82, col:C.teal,  type:'router', lbl:'R-DB'        },
+    DWEB:     { xr:.89, yr:.82, col:C.teal,  type:'router', lbl:'R-Web'       },
+
+    // ── Switches ──────────────────────────────────────────────────────────────
+    SIT:      { xr:.33, yr:.72, col:C.dim,   type:'switch', lbl:'SW-IT'       },
+    SNFS:     { xr:.99, yr:.74, col:C.dim,   type:'switch', lbl:'SW-NFS'      },
+    SDB:      { xr:.37, yr:.92, col:C.dim,   type:'switch', lbl:'SW-DB'       },
+    SWEB:     { xr:.85, yr:.92, col:C.dim,   type:'switch', lbl:'SW-Web'      },
+
+    // ── VM Servers ────────────────────────────────────────────────────────────
+    VMIT:     { xr:.23, yr:.72, col:C.amber, type:'server', lbl:'Prometheus\n+Grafana' },
+    VMNFS:    { xr:.99, yr:.86, col:C.amber, type:'server', lbl:'NFS Server'  },
+    VMDB:     { xr:.27, yr:.92, col:C.amber, type:'server', lbl:'MySQL'       },
+    VMWEB:    { xr:.75, yr:.92, col:C.amber, type:'server', lbl:'Apache'      },
+
+    // ── PCs (3 per dept as per spec) ──────────────────────────────────────────
+    PCIT:     { xr:.38, yr:.84, col:C.blue,  type:'pc',     lbl:'VPCs×3'     },
+    PCNFS:    { xr:.91, yr:.84, col:C.blue,  type:'pc',     lbl:'VPCs×3'     },
+    PCDB:     { xr:.42, yr:.99, col:C.blue,  type:'pc',     lbl:'VPCs×3'     },
+    PCWEB:    { xr:.85, yr:.99, col:C.blue,  type:'pc',     lbl:'VPCs×3'     },
+  };
+
+  // Node list for iteration (insertion order = draw order)
+  const NODES = Object.values(N);
+
+  /* ─── EDGES ──────────────────────────────────────────────────────────────── */
+  // Draw order tells the story: Internet → backbone builds → OSPF mesh → Cloud tunnels → dept LANs
+  // [nodeA_key, nodeB_key, style]   style: 'serial'|'ospf'|'udp'|'lan'|'inet'
+  const EDGE_DEFS = [
+    // 1. Internet uplink
+    ['INET',  'RINET', 'inet'],
+
+    // 2. Backbone serial links from R-Internet to each dept backbone router
+    ['RINET', 'RIT',   'serial'],
+    ['RINET', 'RNFS',  'serial'],
+    ['RINET', 'RDB',   'serial'],
+    ['RINET', 'RWEB',  'serial'],
+
+    // 3. OSPF full mesh between dept backbone routers (6 links)
+    ['RIT',   'RNFS',  'ospf'],
+    ['RIT',   'RDB',   'ospf'],
+    ['RIT',   'RWEB',  'ospf'],
+    ['RNFS',  'RDB',   'ospf'],
+    ['RNFS',  'RWEB',  'ospf'],
+    ['RDB',   'RWEB',  'ospf'],
+
+    // 4. Backbone router → Cloud Node (Ethernet to Cloud)
+    ['RIT',   'CIT',   'lan'],
+    ['RNFS',  'CNFS',  'lan'],
+    ['RDB',   'CDB',   'lan'],
+    ['RWEB',  'CWEB',  'lan'],
+
+    // 5. Cloud Node → Dept router (UDP tunnel — shown dashed)
+    ['CIT',   'DIT',   'udp'],
+    ['CNFS',  'DNFS',  'udp'],
+    ['CDB',   'DDB',   'udp'],
+    ['CWEB',  'DWEB',  'udp'],
+
+    // 6. Dept router → Switch
+    ['DIT',   'SIT',   'lan'],
+    ['DNFS',  'SNFS',  'lan'],
+    ['DDB',   'SDB',   'lan'],
+    ['DWEB',  'SWEB',  'lan'],
+
+    // 7. Switch → VM Server
+    ['SIT',   'VMIT',  'lan'],
+    ['SNFS',  'VMNFS', 'lan'],
+    ['SDB',   'VMDB',  'lan'],
+    ['SWEB',  'VMWEB', 'lan'],
+
+    // 8. Switch → PCs
+    ['SIT',   'PCIT',  'lan'],
+    ['SNFS',  'PCNFS', 'lan'],
+    ['SDB',   'PCDB',  'lan'],
+    ['SWEB',  'PCWEB', 'lan'],
+  ];
+
+  /* ─── STYLE MAP ──────────────────────────────────────────────────────────── */
+  const EDGE_STYLE = {
+    inet:   { color: C.cloud, alpha:.55, width:1.5, dash:[],     glow:4  },
+    serial: { color: C.teal,  alpha:.65, width:1.8, dash:[],     glow:8  },
+    ospf:   { color: C.teal,  alpha:.40, width:1.2, dash:[4,4],  glow:5  },
+    udp:    { color: C.blue,  alpha:.50, width:1.2, dash:[3,5],  glow:6  },
+    lan:    { color: C.dim,   alpha:.50, width:1.0, dash:[],     glow:3  },
+  };
+
+  /* ─── ICON DRAWING ───────────────────────────────────────────────────────── */
+  function drawIcon(type, x, y, col, s) {
+    ctx.strokeStyle = rgba(col, .9);
+    ctx.fillStyle   = rgba(col, .9);
+    ctx.lineWidth   = 1.3;
+    ctx.beginPath();
+    switch(type) {
+      case 'cloud':
+        ctx.arc(x-s*.35, y+s*.1, s*.38, Math.PI*.55, Math.PI*1.95);
+        ctx.arc(x+s*.35, y+s*.1, s*.38, Math.PI*1.05, Math.PI*2.45);
+        ctx.arc(x,       y-s*.2, s*.32, Math.PI*1.05, Math.PI*2.0);
+        ctx.stroke(); break;
+      case 'router':
+        ctx.arc(x, y, s*.65, 0, Math.PI*2); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x,      y-s*.65); ctx.lineTo(x,      y-s*.95);
+        ctx.moveTo(x,      y+s*.65); ctx.lineTo(x,      y+s*.95);
+        ctx.moveTo(x-s*.65,y);       ctx.lineTo(x-s*.95,y);
+        ctx.moveTo(x+s*.65,y);       ctx.lineTo(x+s*.95,y);
+        ctx.stroke(); break;
+      case 'switch':
+        // Rectangle with two arrows
+        ctx.strokeRect(x-s*.8, y-s*.3, s*1.6, s*.6);
+        ctx.beginPath();
+        ctx.moveTo(x-s*.4,y-s*.05); ctx.lineTo(x+s*.4,y-s*.05);
+        ctx.moveTo(x+s*.25,y-s*.2); ctx.lineTo(x+s*.4,y-s*.05); ctx.lineTo(x+s*.25,y+s*.1);
+        ctx.moveTo(x+s*.1, y+s*.05); ctx.lineTo(x-s*.1,y+s*.05);
+        ctx.stroke(); break;
+      case 'server':
+        for(let i=0;i<3;i++){
+          const yy = y - s*.5 + i*s*.46;
+          ctx.strokeRect(x-s*.7, yy, s*1.4, s*.34);
+          ctx.beginPath(); ctx.arc(x+s*.38, yy+s*.17, s*.09, 0, Math.PI*2); ctx.fill(); ctx.beginPath();
+        } break;
+      case 'pc':
+        ctx.strokeRect(x-s*.55, y-s*.5, s*1.1, s*.75);
+        ctx.moveTo(x-s*.3,y+s*.25); ctx.lineTo(x+s*.3,y+s*.25);
+        ctx.moveTo(x,y+s*.25);      ctx.lineTo(x,y+s*.6);
+        ctx.moveTo(x-s*.35,y+s*.6); ctx.lineTo(x+s*.35,y+s*.6);
+        ctx.stroke(); break;
+    }
+  }
+
+  /* ─── GRID ───────────────────────────────────────────────────────────────── */
+  function drawGrid(W,H) {
+    ctx.save();
+    ctx.strokeStyle = rgba(C.grid,.5);
+    ctx.lineWidth = 1;
+    const sx=Math.round(W/9), sy=Math.round(H/6);
+    for(let x=0;x<=W;x+=sx){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+    for(let y=0;y<=H;y+=sy){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+    ctx.restore();
+  }
+
+  /* ─── STATE ──────────────────────────────────────────────────────────────── */
+  let W, H, PX;
+  const SPEED   = 0.022;
+  const PAUSE_F = 130;
+  const FADE_F  = 55;
+  let edgeProg, edgeActive, pauseCount, fadeIn, phase;
+
+  // Build node key → index map
+  const NODE_KEYS = Object.keys(N);
+
+  function nodePos(key) {
+    const n = N[key];
+    return { x: n.xr * W, y: n.yr * H };
+  }
+
+  function resize() {
+    const r = hero.getBoundingClientRect();
+    W = r.width; H = r.height;
+    canvas.width = W; canvas.height = H;
+    PX = Math.min(W, H) * 0.024;
+  }
+
+  function reset() {
+    edgeProg = EDGE_DEFS.map(()=>0);
+    edgeActive = 0; pauseCount = 0; fadeIn = 0; phase = 'draw';
+  }
+
+  /* ─── REACHED NODES ──────────────────────────────────────────────────────── */
+  function reachedSet() {
+    const s = new Set();
+    EDGE_DEFS.forEach(([a,b], i) => {
+      if(edgeProg[i] > 0)  s.add(a);
+      if(edgeProg[i] >= 1) s.add(b);
+    });
+    return s;
+  }
+
+  /* ─── DRAW EDGE ──────────────────────────────────────────────────────────── */
+  function drawEdge(i, t, alpha) {
+    const [ak, bk, style] = EDGE_DEFS[i];
+    const a = nodePos(ak), b = nodePos(bk);
+    const st = EDGE_STYLE[style];
+    ctx.save();
+    ctx.globalAlpha  = alpha * st.alpha;
+    ctx.strokeStyle  = rgba(st.color, 1);
+    ctx.lineWidth    = st.width;
+    ctx.setLineDash(st.dash);
+    ctx.shadowColor  = rgba(st.color, .4);
+    ctx.shadowBlur   = st.glow;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  /* ─── DRAW NODE ──────────────────────────────────────────────────────────── */
+  function drawNode(key, alpha) {
+    const n = N[key];
+    const {x,y} = nodePos(key);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // glow halo
+    const g = ctx.createRadialGradient(x,y,0,x,y,PX*3.8);
+    g.addColorStop(0, rgba(n.col,.20));
+    g.addColorStop(1, rgba(n.col,0));
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x,y,PX*3.8,0,Math.PI*2); ctx.fill();
+
+    // dark bg circle
+    ctx.fillStyle = rgba([14,16,19],.88);
+    ctx.beginPath(); ctx.arc(x,y,PX*1.45,0,Math.PI*2); ctx.fill();
+
+    // icon
+    drawIcon(n.type, x, y, n.col, PX);
+
+    // label — handle multi-line (split on \n)
+    ctx.fillStyle    = rgba(n.col,.82);
+    ctx.font         = `500 ${Math.round(PX*.62)}px "IBM Plex Mono",monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'top';
+    const lines = n.lbl.split('\n');
+    lines.forEach((line, li) => {
+      ctx.fillText(line, x, y + PX*1.6 + li * PX*.75);
+    });
+
+    ctx.restore();
+  }
+
+  /* ─── RENDER LOOP ─────────────────────────────────────────────────────────── */
+  function tick() {
+    ctx.clearRect(0,0,W,H);
+    drawGrid(W,H);
+
+    const alpha = phase==='fade' ? Math.max(0, 1-fadeIn/FADE_F) : 1;
+
+    // draw completed edges
+    for(let i=0;i<edgeActive;i++) drawEdge(i,1,alpha);
+    // draw active edge
+    if(phase==='draw' && edgeActive<EDGE_DEFS.length)
+      drawEdge(edgeActive, edgeProg[edgeActive], 1);
+
+    // draw reached nodes
+    reachedSet().forEach(k => drawNode(k, alpha));
+
+    // phase logic
+    if(phase==='draw') {
+      edgeProg[edgeActive] = Math.min(1, edgeProg[edgeActive]+SPEED);
+      if(edgeProg[edgeActive]>=1){
+        edgeActive++;
+        if(edgeActive>=EDGE_DEFS.length) phase='pause';
+      }
+    } else if(phase==='pause') {
+      if(++pauseCount>=PAUSE_F) phase='fade';
+    } else if(phase==='fade') {
+      if(++fadeIn>=FADE_F) reset();
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  /* ─── INIT ───────────────────────────────────────────────────────────────── */
+  resize();
+  reset();
+  if(window.matchMedia('(prefers-reduced-motion:reduce)').matches){
+    edgeProg=EDGE_DEFS.map(()=>1); edgeActive=EDGE_DEFS.length;
+    phase='pause'; pauseCount=999999;
+  }
+  tick();
+  window.addEventListener('resize', resize);
+})();
+</script>
 </body>
 </html>
